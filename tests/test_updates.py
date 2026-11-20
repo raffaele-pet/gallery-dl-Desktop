@@ -30,6 +30,9 @@ class UpdateTests(unittest.TestCase):
             profile = root / '.browser-profile'
             profile.mkdir()
             (profile / 'session').write_bytes(b'private')
+            retired = root / app_update.RETIRED_LOGO
+            retired.parent.mkdir()
+            retired.write_bytes(b'old logo')
             with patch('app_update.APP_DIR', root):
                 archive = source_archive({'.browser-profile/session': b'overwritten',
                                           '.venv/pyvenv.cfg': b'overwritten',
@@ -40,10 +43,21 @@ class UpdateTests(unittest.TestCase):
             self.assertEqual((root / 'app.py').read_text(), 'VERSION = 2\n')
             self.assertEqual((profile / 'session').read_bytes(), b'private')
             self.assertFalse((root / '.venv').exists())
+            self.assertFalse(retired.exists())
             self.assertIn(b'\r\n', (root / 'INSTALL.bat').read_bytes())
             backup = list((root / '.update-backups').glob('*/old/app.py'))
             self.assertEqual(len(backup), 1)
             self.assertEqual(backup[0].read_text(), 'VERSION = 1\n')
+            self.assertEqual((backup[0].parent / app_update.RETIRED_LOGO).read_bytes(), b'old logo')
+
+    def test_exe_install_uses_the_installer_for_source_updates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / app_update.RELEASE_MARKER).write_text('1.0.0')
+            with patch('app_update.APP_DIR', root), patch('app_update.http_session') as session:
+                with self.assertRaisesRegex(RuntimeError, 'Windows installer'):
+                    app_update.update_application()
+                session.assert_not_called()
 
     def test_invalid_zip_source_is_rejected_before_replacement(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):

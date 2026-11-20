@@ -5,12 +5,20 @@ title gallery-dl Desktop - Installation and updates
 color 0F
 
 set "PROJECT_DIR=%~dp0"
+cd /d "%PROJECT_DIR%"
 set "VENV_DIR=%PROJECT_DIR%.venv"
 set "VENV_PY=%VENV_DIR%\Scripts\python.exe"
 set "VENV_GDL=%VENV_DIR%\Scripts\gallery-dl.exe"
 set "VENV_YTDLP=%VENV_DIR%\Scripts\yt-dlp.exe"
 set "CHECK_ONLY=0"
+set "FROM_SETUP=0"
+set "WINGET_MODE="
 if /I "%~1"=="--check" set "CHECK_ONLY=1"
+if /I "%~1"=="--setup" (
+    set "FROM_SETUP=1"
+    set "WINGET_MODE=--silent --disable-interactivity"
+)
+set "PATH=%LOCALAPPDATA%\Microsoft\WinGet\Links;%PATH%"
 
 echo ================================================================
 echo                    gallery-dl Desktop INSTALLER
@@ -36,10 +44,6 @@ if not exist "%PROJECT_DIR%network.py" (
 )
 if not exist "%PROJECT_DIR%app_update.py" (
     call :fatal "app_update.py is missing. Update all project files."
-    exit /b 1
-)
-if not exist "%PROJECT_DIR%assets\gallery-dl-logo.png" (
-    call :fatal "The application logo is missing."
     exit /b 1
 )
 if not exist "%PROJECT_DIR%assets\gallery-dl-icon.png" (
@@ -87,7 +91,7 @@ if errorlevel 1 (
 echo [1/6] Checking Python...
 if not defined PYTHON_LAUNCHER (
     echo [INSTALL] Python 3.12
-    winget install --id Python.Python.3.12 --exact --scope user --accept-package-agreements --accept-source-agreements
+    winget install --id Python.Python.3.12 --exact --scope user --accept-package-agreements --accept-source-agreements !WINGET_MODE!
     if errorlevel 1 (
         call :fatal "Python installation failed."
         exit /b 1
@@ -139,6 +143,7 @@ if "!GDL_BEFORE!"=="!GDL_AFTER!" (echo [OK] gallery-dl !GDL_AFTER! is already up
 if "!YTDLP_BEFORE!"=="!YTDLP_AFTER!" (echo [OK] yt-dlp !YTDLP_AFTER! is already up to date.) else (echo [UPDATED] yt-dlp !YTDLP_BEFORE! --^> !YTDLP_AFTER!)
 
 echo.
+echo [4/6] Checking the browser and media tools...
 echo Checking the installed browser...
 "%VENV_PY%" -c "import engine; path,name,_=engine.installed_browser(); print('[OK] '+name if path else '[MISSING] Google Chrome, Microsoft Edge o Brave'); raise SystemExit(0 if path else 1)"
 if errorlevel 1 (
@@ -149,20 +154,23 @@ if exist "%PROJECT_DIR%.browser-binaries" (
     echo [CLEANUP] Removing the old bundled Chromium browser...
     rmdir /s /q "%PROJECT_DIR%.browser-binaries"
 )
-echo [4/6] Checking FFmpeg for HLS/DASH videos and Pixiv Ugoira...
+echo Checking FFmpeg for HLS/DASH videos and Pixiv Ugoira...
 call :find_ffmpeg
 if "!FFMPEG_OK!"=="0" (
-    winget install --id Gyan.FFmpeg --exact --accept-package-agreements --accept-source-agreements
+    echo [INSTALL] FFmpeg
+    winget install --id Gyan.FFmpeg --exact --accept-package-agreements --accept-source-agreements !WINGET_MODE!
     if errorlevel 1 (
         echo [INFO] The main package is unavailable. Trying the yt-dlp FFmpeg package...
-        winget install --id yt-dlp.FFmpeg --exact --accept-package-agreements --accept-source-agreements
+        winget install --id yt-dlp.FFmpeg --exact --accept-package-agreements --accept-source-agreements !WINGET_MODE!
     )
     call :find_ffmpeg
     if "!FFMPEG_OK!"=="0" echo [WARNING] FFmpeg is not on the current PATH. Restart Windows if necessary.
 ) else (
     echo [OK] FFmpeg is already available.
-    winget upgrade --id Gyan.FFmpeg --exact --accept-package-agreements --accept-source-agreements >nul 2>&1
-    winget upgrade --id yt-dlp.FFmpeg --exact --accept-package-agreements --accept-source-agreements >nul 2>&1
+    if "%FROM_SETUP%"=="0" (
+        winget upgrade --id Gyan.FFmpeg --exact --accept-package-agreements --accept-source-agreements >nul 2>&1
+        winget upgrade --id yt-dlp.FFmpeg --exact --accept-package-agreements --accept-source-agreements >nul 2>&1
+    )
 )
 
 echo.
@@ -190,6 +198,7 @@ if errorlevel 1 (
     call :fatal "app.py contains a syntax error."
     exit /b 1
 )
+if "%FROM_SETUP%"=="1" exit /b 0
 
 echo.
 echo [6/6] Creating the desktop shortcut...
@@ -232,5 +241,5 @@ echo.
 echo ================================================================
 echo [ERROR] %~1
 echo ================================================================
-if "%CHECK_ONLY%"=="0" pause
+if "%CHECK_ONLY%%FROM_SETUP%"=="00" pause
 exit /b 1

@@ -148,13 +148,22 @@ def save_image(data, url, folder, filter_small=True):
     return path, existing
 
 
-def response_bytes(response):
+def response_bytes(response, track=False):
     response.raise_for_status()
     result = bytearray()
+    if track:
+        value = response.headers.get('Content-Length', '')
+        total = int(value) if value.isdecimal() and not response.headers.get('Content-Encoding') else 0
+        started = last_update = time.monotonic()
     for chunk in response.iter_content(65536):
         result.extend(chunk)
         if len(result) > MAX_BYTES:
             raise ValueError('File is too large (over 80 MB).')
+        if track and (now := time.monotonic()) - last_update >= 0.2:
+            percent = min(99, 100 * len(result) / total) if total else None
+            emit('progress', percent=percent, speed=f'{len(result) / (now - started) / 1024:.0f} KiB/s',
+                 label='Downloading image')
+            last_update = now
     return bytes(result)
 
 
@@ -168,9 +177,9 @@ def _generic_download(url, destination, session):
     session.headers.update({'User-Agent': USER_AGENT})
     emit('status', text='Reading the page and looking for images…')
     with session.get(url, timeout=(15, 40), stream=True) as response:
-        data = response_bytes(response)
         base = response.url
         content_type = response.headers.get('Content-Type', '').lower()
+        data = response_bytes(response, track=content_type.startswith('image/'))
     if content_type.startswith('image/'):
         saved = save_image(data, base, folder, filter_small=False)
         if not saved:
@@ -183,7 +192,6 @@ def _generic_download(url, destination, session):
         candidates = rendered_images(base)
     if not candidates:
         raise ValueError('No images found on the page. The site may require sign-in or block downloads.')
-    emit('log', text=f'Found {len(candidates)} image URLs. Checking and downloading files…')
     session.headers['Referer'] = base
     count = failed = 0
     seen = set()
@@ -191,7 +199,7 @@ def _generic_download(url, destination, session):
         emit('status', text=f'Image {index} of {len(candidates)} · {count} verified files')
         try:
             with session.get(candidate, timeout=(10, 25), stream=True) as response:
-                data = response_bytes(response)
+                data = response_bytes(response, track=True)
             digest = hashlib.sha256(data).digest()
             if digest in seen:
                 continue
@@ -208,6 +216,45 @@ def _generic_download(url, destination, session):
     return count, failed
 
 
+class VideoProgress:
+    """Combine audio and video tracks and bound estimates for segmented downloads."""
+
+    def __init__(self, formats):
+        sizes = {item['format_id']: item.get('filesize') or item.get('filesize_approx') for item in formats}
+        self.weights = sizes if sizes and all(sizes.values()) else dict.fromkeys(sizes, 1)
+        self.fractions = {}
+
+    def update(self, format_id, sample):
+        if self.weights and format_id not in self.weights:
+            return None
+        downloaded = sample.get('downloaded_bytes')
+        total = sample.get('total_bytes')
+        estimate = sample.get('total_bytes_estimate')
+        fragments = sample.get('fragment_count')
+        finished = sample.get('status') == 'finished'
+        if finished:
+            fraction = 1.0
+        elif total and downloaded is not None:
+            fraction = downloaded / total
+        elif fragments:
+            # The first HLS estimate can describe only the packet already received.
+            index = sample.get('fragment_index') or 0
+            fraction = index / fragments
+            if downloaded is not None and estimate and downloaded < estimate:
+                fraction = max(fraction, min((index + 1) / fragments, downloaded / estimate))
+        elif downloaded is not None and estimate and downloaded < estimate:
+            fraction = downloaded / estimate
+        else:
+            return None
+        if not finished:
+            fraction = min(fraction, 0.99)
+        self.fractions[format_id] = max(fraction, self.fractions.get(format_id, 0))
+        if not self.weights:
+            return 100 * self.fractions[format_id]
+        received = sum(self.fractions.get(key, 0) * weight for key, weight in self.weights.items())
+        return 100 * received / sum(self.weights.values())
+
+
 def video_download(url, destination):
     """Download videos with yt-dlp and report new/already present files."""
     destination.mkdir(parents=True, exist_ok=True)
@@ -215,11 +262,15 @@ def video_download(url, destination):
               if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS}
     command = [
         sys.executable, '-m', 'yt_dlp', '--ignore-config', '--no-colors', '--newline',
+        '--encoding', 'utf-8', '--no-quiet', '--progress', '--progress-delta', '0.25',
         '--windows-filenames', '--paths', str(destination), '--retries', '2',
         '--fragment-retries', '2', '--socket-timeout', '25',
-        '--print', 'after_move:__YTDLP_DONE__%(filepath)s', url,
+        '--print', 'before_dl:__YTDLP_START__%(requested_formats.:.{format_id,filesize,filesize_approx}|null)j',
+        '--progress-template',
+        'download:__YTDLP_PROGRESS__[%(info.format_id|null)j,%(progress.{status,downloaded_bytes,total_bytes,total_bytes_estimate,fragment_index,fragment_count,_speed_str})j]',
+        '--print', 'after_move:__YTDLP_DONE__%(filepath)s', '--', url,
     ]
-    emit('status', text='Finding and downloading videos with yt-dlp…')
+    emit('status', text='Finding videos…')
     marker = '__YTDLP_DONE__'
     with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                           text=True, encoding='utf-8', errors='replace',
@@ -227,9 +278,22 @@ def video_download(url, destination):
         count = 0
         logs = []
         seen = set()
+        transfer = VideoProgress([])
         for line in process.stdout:
             line = line.strip()
-            if line.startswith(marker):
+            if line.startswith('__YTDLP_START__'):
+                transfer = VideoProgress(json.loads(line.removeprefix('__YTDLP_START__')) or [])
+                emit('status', text='Starting video download…')
+            elif line.startswith('__YTDLP_PROGRESS__'):
+                format_id, sample = json.loads(line.removeprefix('__YTDLP_PROGRESS__'))
+                percent = transfer.update(format_id, sample)
+                if percent == 100:
+                    emit('status', text='Finishing video…')
+                else:
+                    speed = sample.get('_speed_str', '').strip()
+                    emit('progress', label='Downloading video', percent=percent,
+                         speed='' if speed.startswith('Unknown') else speed)
+            elif line.startswith(marker):
                 path = Path(line[len(marker):])
                 try:
                     resolved = path.resolve()
@@ -240,7 +304,7 @@ def video_download(url, destination):
                 seen.add(resolved)
                 count += 1
                 emit('file', name=path.name, existing=resolved in before)
-            elif line:
+            elif line.startswith(('ERROR:', 'WARNING:')):
                 logs.append(line)
                 emit('log', text=line)
         return count, process.wait(), logs
@@ -402,9 +466,21 @@ def gallery_download(url, destination, cookies=None, publish_logs=True,
         process.stdin.close()
         count = 0
         logs = []
+        last_progress = 0.0
         for line in process.stdout:
             line = line.strip()
-            if line.startswith('__GDL_NEW__') or line.startswith('__GDL_OLD__'):
+            if line.startswith('__GDL_START__'):
+                last_progress = 0.0
+                emit('status', text='Starting media download…')
+            elif line.startswith('__GDL_PROGRESS__'):
+                value, _, speed = line.removeprefix('__GDL_PROGRESS__').partition('|')
+                now = time.monotonic()
+                if now - last_progress >= 0.2:
+                    percent = int(value) if value.isdecimal() and int(value) < 100 else None
+                    emit('progress', label='Downloading media', percent=percent,
+                         speed=speed.strip() + 'B/s' if speed.strip() else '')
+                    last_progress = now
+            elif line.startswith('__GDL_NEW__') or line.startswith('__GDL_OLD__'):
                 path = Path(line[11:])
                 if path.is_file() and path.stat().st_size:
                     count += 1
@@ -419,11 +495,9 @@ def gallery_download(url, destination, cookies=None, publish_logs=True,
 def instagram_download(url, destination, images=True, videos=True, separate_media=False):
     """Use the corrected upstream extractor with a current browser session."""
     from maintenance import clear_instagram_cache, engine_ready
-    from gallery_dl.version import __version__
-    emit('log', text='Instagram engine: gallery-dl ' + __version__)
     if not engine_ready():
         raise ValueError('The Instagram engine is outdated or uses an old development '
-                         'build. Click Update to install the current official release.')
+                         'build. Open Tools to update the download engines.')
     cache_retried = False
 
     def download(cookies, publish_logs=True):
@@ -483,11 +557,12 @@ def run(payload):
         image_folder.mkdir(exist_ok=True)
         video_folder.mkdir(exist_ok=True)
     count = failures = warnings = 0
-    for url in normalize_urls('\n'.join(payload['urls'])):
+    urls = normalize_urls('\n'.join(payload['urls']))
+    for index, url in enumerate(urls, 1):
         host = urlsplit(url).hostname
         instagram = host == 'instagram.com' or host.endswith('.instagram.com')
         dedicated = instagram or extractor.find(url) is not None
-        emit('log', text=f'Site: {host}')
+        emit('source', text=host, index=index, count=len(urls))
         try:
             if not dedicated:
                 downloaded = failed = 0
@@ -532,7 +607,7 @@ def run(payload):
         text = f'Completed: {count} verified files ({warnings} invalid items skipped).'
     else:
         text = f'Completed: {count} verified files in the destination folder.'
-    emit('done', text=text)
+    emit('done', text=text, incomplete=bool(failures or warnings))
     return 1 if failures else 0
 
 

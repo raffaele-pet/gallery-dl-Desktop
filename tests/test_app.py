@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import call, patch
@@ -24,8 +25,9 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        if self.path == '/video.mp4':
-            data, kind, code = b'\x00\x00\x00\x18ftypmp42' + (b'\x00' * 512), 'video/mp4', 200
+        if self.path in ('/video.mp4', '/slow.mp4'):
+            size = 768 * 1024 if self.path == '/slow.mp4' else 512
+            data, kind, code = b'\x00\x00\x00\x18ftypmp42' + (b'\x00' * size), 'video/mp4', 200
         elif self.path.startswith('/image'):
             data, kind, code = png(), 'image/png', 200
         elif self.path == '/invalid':
@@ -42,7 +44,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', kind)
         self.send_header('Content-Length', str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        if self.path == '/slow.mp4':
+            try:
+                for start in range(0, len(data), 16384):
+                    self.wfile.write(data[start:start + 16384])
+                    time.sleep(0.025)
+            except (BrokenPipeError, ConnectionResetError):
+                pass  # Extractors may read only the header when identifying the URL.
+        else:
+            self.wfile.write(data)
 
 
 class Tests(unittest.TestCase):
@@ -96,9 +106,11 @@ class Tests(unittest.TestCase):
     def test_application_icon_assets(self):
         assets = Path(__file__).resolve().parents[1] / 'assets'
         with Image.open(assets / 'gallery-dl-icon.png') as icon:
-            self.assertEqual(icon.size, (100, 100))
+            self.assertEqual(icon.size, (256, 256))
         with Image.open(assets / 'gallery-dl-icon.ico') as icon:
             self.assertEqual(icon.format, 'ICO')
+            self.assertTrue({(16, 16), (32, 32), (256, 256)} <= icon.ico.sizes())
+        self.assertFalse((assets / 'gallery-dl-logo.png').exists())
 
     def test_generic_download_and_duplicate(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()) as output:
@@ -206,7 +218,7 @@ class Tests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()), \
                 patch('maintenance.engine_ready', return_value=False), \
                 patch('engine.system_instagram_cookies') as cookies:
-            with self.assertRaisesRegex(ValueError, 'Click Update'):
+            with self.assertRaisesRegex(ValueError, 'Open Tools'):
                 engine.instagram_download('https://www.instagram.com/example/', Path('.'))
             cookies.assert_not_called()
 
@@ -309,6 +321,27 @@ class Tests(unittest.TestCase):
             self.assertEqual(engine.video_download(self.base + '/video.mp4', root)[:2], (1, 0))
             self.assertEqual(len(list(root.glob('*.mp4'))), 1)
             self.assertIn('"existing": true', output.getvalue())
+
+    def test_video_engines_report_live_intermediate_progress(self):
+        for download in (engine.video_download, engine.gallery_download):
+            with self.subTest(engine=download.__name__), tempfile.TemporaryDirectory() as tmp, \
+                    contextlib.redirect_stdout(io.StringIO()) as output:
+                self.assertEqual(download(self.base + '/slow.mp4', Path(tmp))[:2], (1, 0), output.getvalue())
+                events = [json.loads(line) for line in output.getvalue().splitlines()]
+                samples = [event['percent'] for event in events if event['type'] == 'progress']
+                self.assertGreaterEqual(len([value for value in samples if value and value < 99]), 2, events)
+                self.assertNotIn(100, samples)
+                first_progress = next(i for i, event in enumerate(events) if event['type'] == 'progress')
+                first_file = next(i for i, event in enumerate(events) if event['type'] == 'file')
+                self.assertLess(first_progress, first_file)
+
+    def test_first_fragment_does_not_count_as_a_complete_video(self):
+        progress = engine.VideoProgress([])
+        sample = {'status': 'downloading', 'downloaded_bytes': 1024,
+                  'total_bytes_estimate': 1024, 'fragment_index': 0, 'fragment_count': 36}
+        self.assertEqual(progress.update('video', sample), 0)
+        sample.update(downloaded_bytes=5000000, total_bytes_estimate=20000000, fragment_index=8)
+        self.assertEqual(progress.update('video', sample), 25)
 
     def test_at_least_one_media_type_is_required(self):
         with tempfile.TemporaryDirectory() as tmp, contextlib.redirect_stdout(io.StringIO()):

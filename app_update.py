@@ -12,11 +12,17 @@ APP_DIR = Path(__file__).resolve().parent
 REPOSITORY = 'raffaele-pet/gallery-dl-Desktop'
 LEGACY_REPOSITORY = 'raffaele-pet/gallery-dl-windows-gui'
 MISSPELLED_REPOSITORY = 'raffaele-pet/gallery-dl-Dektop'
+RELEASE_MARKER = '.installed-release'
+RETIRED_LOGO = 'assets/gallery-dl-logo.png'
 ALLOWED_FILES = {
     'app.py', 'engine.py', 'gallery_worker.py', 'maintenance.py', 'network.py',
     'app_update.py', 'requirements.txt', 'INSTALL.bat', 'RUN.vbs', 'RUN_DEBUG.cmd',
     'README.md', 'LICENSE', '.gitignore', '.gitattributes',
 }
+
+
+def is_packaged_installation():
+    return (APP_DIR / RELEASE_MARKER).is_file()
 
 
 def git(*arguments, check=True):
@@ -32,6 +38,8 @@ def git(*arguments, check=True):
 
 def update_application():
     """Fast-forward clean Git installs; ZIP installs keep backups of replaced files."""
+    if is_packaged_installation():
+        raise RuntimeError('Use the latest Windows installer to update this copy of the application.')
     if (APP_DIR / '.git').exists():
         remote = git('remote', 'get-url', 'origin').stdout.strip().removesuffix('.git')
         allowed_remotes = {prefix + repository for prefix in
@@ -88,6 +96,8 @@ def install_archive(data, commit):
         raise ValueError('The application archive is incomplete.')
     changes = {name: content for name, content in files.items()
                if not (APP_DIR / name).is_file() or (APP_DIR / name).read_bytes() != content}
+    if RETIRED_LOGO not in files and (APP_DIR / RETIRED_LOGO).is_file():
+        changes[RETIRED_LOGO] = None
     if not changes:
         print('The application is already up to date.', flush=True)
         return False
@@ -95,6 +105,8 @@ def install_archive(data, commit):
     # Stage and validate the complete archive before replacing any application file.
     staging = backup / 'new'
     for name, content in changes.items():
+        if content is None:
+            continue
         staged = staging / name
         staged.parent.mkdir(parents=True, exist_ok=True)
         staged.write_bytes(content)
@@ -102,14 +114,17 @@ def install_archive(data, commit):
             compile(content, name, 'exec')
     replaced = []
     try:
-        for name in changes:
+        for name, content in changes.items():
             target = APP_DIR / name
             old = backup / 'old' / name
             if target.exists():
                 old.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(target, old)
             target.parent.mkdir(parents=True, exist_ok=True)
-            (staging / name).replace(target)
+            if content is None:
+                target.unlink()
+            else:
+                (staging / name).replace(target)
             replaced.append(name)
     except OSError:
         for name in reversed(replaced):

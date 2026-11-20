@@ -23,6 +23,15 @@ def run(payload):
     videos = bool(payload.get('videos', False))
     allowed = (() if not images else IMAGE_EXTENSIONS) + (() if not videos else VIDEO_EXTENSIONS)
     config.set((), 'file-filter', f'extension in {allowed!r}')
+    config.set(('downloader',), 'progress', 0.2)
+    config.set(('output',), 'shorten', False)
+    config.set(('output',), 'mode', {
+        'start': '__GDL_START__\n',
+        'success': '',
+        'skip': '',
+        'progress': '__GDL_PROGRESS__|{1}\n',
+        'progress-total': '__GDL_PROGRESS__{3}|{1}\n',
+    })
     if payload.get('separate_media', True):
         mapping = {}
         if images:
