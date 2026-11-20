@@ -153,7 +153,7 @@ class Tests(unittest.TestCase):
             self.assertEqual(engine.run({'urls': [url], 'destination': tmp}), 0)
             self.assertEqual(browser.call_args_list, [call(url), call(url, interactive=True)])
             download.assert_called_once_with(
-                url, Path(tmp), login_cookie, images=True, videos=False,
+                url, Path(tmp).resolve(), login_cookie, images=True, videos=False,
                 separate_media=True)
 
     def test_instagram_profile_reuses_system_browser_session(self):
@@ -167,7 +167,7 @@ class Tests(unittest.TestCase):
             self.assertEqual(engine.run({'urls': [url], 'destination': tmp}), 0)
             browser.assert_not_called()
             download.assert_called_once_with(
-                url, Path(tmp), login_cookie, publish_logs=False, images=True,
+                url, Path(tmp).resolve(), login_cookie, publish_logs=False, images=True,
                 videos=False, separate_media=True)
 
     def test_worker_protocol(self):
