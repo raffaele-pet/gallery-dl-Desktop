@@ -9,8 +9,9 @@ import zipfile
 from network import http_session
 
 APP_DIR = Path(__file__).resolve().parent
-REPOSITORY = 'raffaele-pet/gallery-dl-Dektop'
+REPOSITORY = 'raffaele-pet/gallery-dl-Desktop'
 LEGACY_REPOSITORY = 'raffaele-pet/gallery-dl-windows-gui'
+MISSPELLED_REPOSITORY = 'raffaele-pet/gallery-dl-Dektop'
 ALLOWED_FILES = {
     'app.py', 'engine.py', 'gallery_worker.py', 'maintenance.py', 'network.py',
     'app_update.py', 'requirements.txt', 'INSTALL.bat', 'RUN.vbs', 'RUN_DEBUG.cmd',
@@ -35,7 +36,7 @@ def update_application():
         remote = git('remote', 'get-url', 'origin').stdout.strip().removesuffix('.git')
         allowed_remotes = {prefix + repository for prefix in
                            ('https://github.com/', 'git@github.com:') for repository in
-                           (REPOSITORY, LEGACY_REPOSITORY)}
+                           (REPOSITORY, LEGACY_REPOSITORY, MISSPELLED_REPOSITORY)}
         if remote.casefold() not in {url.casefold() for url in allowed_remotes}:
             raise RuntimeError('The Git remote does not match the application repository.')
         if git('status', '--porcelain', '--untracked-files=no').stdout.strip():
